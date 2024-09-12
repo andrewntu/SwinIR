@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-
+import sys
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.ReLU, drop=0.):
@@ -25,7 +25,7 @@ class Mlp(nn.Module):
         return x
 
 
-def window_partition(x, window_size):
+def window_partition(x, window_size): # Change from 2-D to 1-D configuration -> H, W to L
     """
     Args:
         x: (B, H, W, C)
@@ -35,6 +35,8 @@ def window_partition(x, window_size):
         windows: (num_windows*B, window_size, window_size, C)
     """
     B, H, W, C = x.shape
+    # print(x.shape)
+    # sys.exit()
     x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
     return windows
@@ -488,7 +490,7 @@ class RSTB(nn.Module):
 
 
 class PatchEmbed(nn.Module):
-    r""" Image to Patch Embedding
+    r""" Image to Patch Embedding -> transferring 2-D patching to 1-D patching
 
     Args:
         img_size (int): Image size.  Default: 224.
@@ -498,11 +500,14 @@ class PatchEmbed(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer. Default: None
     """
 
-    def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
+    def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None): # default in_chans = 1
         super().__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
-        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
+        # patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]] #right now input img=64, patch_size = 1
+        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // img_size[1]]
+        # print(patches_resolution, img_size, patch_size)
+        # sys.exit()
         self.img_size = img_size
         self.patch_size = patch_size
         self.patches_resolution = patches_resolution
@@ -543,9 +548,10 @@ class PatchUnEmbed(nn.Module):
 
     def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
         super().__init__()
-        img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
-        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
+        img_size = to_2tuple(img_size) #64 -> 64*64
+        patch_size = to_2tuple(patch_size) #1 -> 1*1
+        # patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
+        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // img_size[1]]
         self.img_size = img_size
         self.patch_size = patch_size
         self.patches_resolution = patches_resolution
@@ -651,8 +657,9 @@ class SwinIR(nn.Module):
         num_feat = 64
         self.img_range = img_range
         if in_chans == 3:
-            rgb_mean = (0.4488, 0.4371, 0.4040)
-            self.mean = torch.Tensor(rgb_mean).view(1, 3, 1, 1)
+            # rgb_mean = (0.4488, 0.4371, 0.4040)
+            # self.mean = torch.Tensor(rgb_mean).view(1, 3, 1, 1)
+            self.mean = torch.zeros(1, 1, 1, 1)
         else:
             self.mean = torch.zeros(1, 1, 1, 1)
         self.upscale = upscale
@@ -784,17 +791,19 @@ class SwinIR(nn.Module):
 
     def forward_features(self, x):
         x_size = (x.shape[2], x.shape[3])
+        print("1: ",x.shape)
         x = self.patch_embed(x)
+        print("2: ",x.shape)
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
-
+        print("3: ",x.shape)
         for layer in self.layers:
             x = layer(x, x_size)
-
+        print("4: ",x.shape)
         x = self.norm(x)  # B L C
         x = self.patch_unembed(x, x_size)
-
+        print("5: ",x.shape)
         return x
 
     def forward(self, x):
@@ -806,10 +815,15 @@ class SwinIR(nn.Module):
 
         if self.upsampler == 'pixelshuffle':
             # for classical SR
+            print(f'0st x:{x.shape}') 
             x = self.conv_first(x)
+            print(f'1st x:{x.shape}')    
             x = self.conv_after_body(self.forward_features(x)) + x
+            print(f'2nd x:{x.shape}')
             x = self.conv_before_upsample(x)
+            print(f'3rd x:{x.shape}') 
             x = self.conv_last(self.upsample(x))
+            print(f'4th x:{x.shape}')
         elif self.upsampler == 'pixelshuffledirect':
             # for lightweight SR
             x = self.conv_first(x)
@@ -825,8 +839,14 @@ class SwinIR(nn.Module):
             x = self.conv_last(self.lrelu(self.conv_hr(x)))
         else:
             # for image denoising and JPEG compression artifact reduction
-            x_first = self.conv_first(x)
-            res = self.conv_after_body(self.forward_features(x_first)) + x_first
+
+            x_first = self.conv_first(x); 
+            #(y_first)
+            x = self.forward_features(x_first)
+            #concat here??
+
+            res = self.conv_after_body(x) + x_first
+
             x = x + self.conv_last(res)
 
         x = x / self.img_range + self.mean
@@ -853,8 +873,8 @@ if __name__ == '__main__':
     model = SwinIR(upscale=2, img_size=(height, width),
                    window_size=window_size, img_range=1., depths=[6, 6, 6, 6],
                    embed_dim=60, num_heads=[6, 6, 6, 6], mlp_ratio=2, upsampler='pixelshuffledirect')
-    print(model)
-    print(height, width, model.flops() / 1e9)
+    # print(model)
+    # print(height, width, model.flops() / 1e9)
 
     x = torch.randn((1, 3, height, width))
     x = model(x)
